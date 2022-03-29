@@ -2,7 +2,10 @@ import React, { useEffect } from "react";
 import Arweave from "arweave";
 import { JWKInterface } from "arweave/node/lib/wallet";
 import { wkey } from "../wkey/wkey";
+import useFetchGraph from "../useFetchGraph";
+import { Buffer } from "buffer";
 
+const wallet = "0xaknsdiasf87ads98cbaisdf";
 const fundWallet = async (arweave: Arweave, jwk: JWKInterface) => {
   const addr = await arweave.wallets.jwkToAddress(jwk);
 
@@ -69,6 +72,7 @@ type CampaignTags =
   | "Pneumonia";
 
 type CampaignDetails = {
+  id: string;
   title: string;
   description: string;
   goal: number;
@@ -111,6 +115,7 @@ function Onboard() {
     organiserPin: "",
   });
   const [campaignInfo, setCampaignInfo] = React.useState<CampaignDetails>({
+    id: "",
     title: "",
     description: "",
     goal: 0,
@@ -136,31 +141,106 @@ function Onboard() {
     hasContent: false,
   });
 
-  // const [address, setAddress] = React.useState("");
-  // const [balance, setBalance] = React.useState("");
-  // const setData = async (jwk: JWKInterface) => {
-  //   console.log("Setting address...");
-  //   console.log("jwk: ", jwk);
-  //   const addr = await arweave.wallets.jwkToAddress(jwk);
-  //   setAddress(addr);
-  //   const bal = await arweave.wallets.getBalance(addr);
-  //   setBalance(bal);
-  //   console.log("Address: ", addr);
-  //   console.log("Balance: ", bal);
-  // };
-  useEffect(() => {
-    try {
-      console.log("ok");
-    } catch (error) {
-      console.log("Error fetching from arweave ", error);
+  const { graph, error, loading } = useFetchGraph(
+    "POST",
+    "http://localhost:1984/graphql",
+    `query Campaigns($tags: [TagFilter!]) {
+        transactions(tags: $tags) {
+            edges { 
+                node{
+                    id
+                    data {
+                      type
+                      size
+                    }
+                    tags {
+                      name
+                      value
+                    }
+                    block {
+                        timestamp
+                        height
+                    }
+                }
+            }
+        }
+    }`,
+
+    {
+      tags: [
+        {
+          name: "Content-Code",
+          values: ["campaign"],
+        },
+      ],
     }
-  }, []);
+  );
+
+  const generateId = (title: string) => {
+    const id =
+      title.toLowerCase().replace(/\s/g, "-") +
+      "-" +
+      wallet.substring(0, 4) +
+      wallet.substring(wallet.length - 4, wallet.length) +
+      "-" +
+      Date.now();
+    return id;
+  };
+  const [uploadStatus, setUploadStatus] = React.useState("");
+  const [isUploading, setIsUploading] = React.useState(false);
+  const handleFileUploadToArweave = async (fileblb: Blob, fname: string) => {
+    const { arweave, jwk } = await ConnectAr();
+    const fileread = new window.FileReader();
+    fileread.readAsArrayBuffer(fileblb);
+    fileread.onloadend = () => {
+      uploadAsBuffer(fileread.result as ArrayBuffer);
+    };
+    const uploadAsBuffer = async (fr: ArrayBuffer) => {
+      const fileBuffer = await Buffer.from(fr);
+      const fileType = fileblb?.type;
+      const fileSize = fileblb?.size;
+      if (fileSize < 1024 * 1024 * 1024 * 8) {
+        const txn = await arweave.createTransaction(
+          {
+            data: fileBuffer,
+          },
+          jwk
+        );
+        txn.addTag("App-Name", "Beneficence");
+        txn.addTag("App-Version", "1.0");
+        txn.addTag("Content-Type", fileType);
+        txn.addTag("Content-Code", "image");
+        txn.addTag("Content-Name", fname);
+        txn.addTag("Campaign-Id", campaignInfo.id);
+        txn.addTag("Campaign-author", wallet);
+        await arweave.transactions.sign(txn, jwk);
+        setIsUploading(true);
+
+        const uploadr = await arweave.transactions.getUploader(txn);
+        while (uploadr.isComplete === false) {
+          await uploadr.uploadChunk();
+          setUploadStatus(`Uploading... ${uploadr.pctComplete}%`);
+        }
+        console.log(uploadr);
+        await arweave.api.get("mine");
+        const mined = await arweave.transactions.get(txn.id);
+        const block = mined.block;
+        console.log("Block: ", block);
+        setUploadStatus("");
+      } else {
+        alert("File size is too large");
+      }
+    };
+  };
 
   const handleTxn = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    console.log("running");
+    setCampaignInfo({
+      ...campaignInfo,
+      id: generateId(campaignInfo.title),
+    });
+    console.log("submitting campaign data");
     const { arweave, jwk, addr } = await ConnectAr();
-
     const data = JSON.stringify({
       organiser: organiserInfo,
       campaign: campaignInfo,
@@ -179,16 +259,18 @@ function Onboard() {
     txn.addTag("App-Name", "Beneficence");
     txn.addTag("App-Version", "1.0");
     txn.addTag("Content-Type", "application/json");
+    txn.addTag("Content-Code", "campaign");
+    txn.addTag("Campaign-Id", campaignInfo.id);
+    txn.addTag("Organiser", organiserInfo.organiserPubkey);
     if (campaignInfo.tags.length > 0) {
       txn.addTag(`Campaign-Category`, campaignInfo.tags.join(","));
     } else {
       txn.addTag(`Campaign-Category`, "None");
     }
+
     await arweave.transactions.sign(txn, jwk);
     const txn_success = await arweave.transactions.post(txn);
-    console.log("txn_success: ", txn_success);
     console.log("txn id: ", txn.id);
-    console.log("Data: ", txn.data);
     await arweave.api.get("mine");
     const mined = await arweave.transactions.get(txn.id);
     const block = mined.block;
@@ -202,6 +284,7 @@ function Onboard() {
     const parsedData = JSON.parse(data);
     console.log("parsedData: ", parsedData);
   };
+
   return (
     <div>
       <form className="form-onboard" onSubmit={handleTxn}>
@@ -302,7 +385,38 @@ function Onboard() {
           }}
         />
         <input type="submit" value="Submit details" />
+        <input
+          type="file"
+          accept="image/*"
+          onChange={(e) => {
+            if (e && e.target && e.target.files && e.target.files.length > 0) {
+              const file = e.target.files[0];
+              const fname = file.name;
+              handleFileUploadToArweave(file, fname);
+            }
+          }}
+        />
+        <input
+          type="file"
+          accept="application/pdf"
+          onChange={(e) => {
+            if (e && e.target && e.target.files && e.target.files.length > 0) {
+              const file = e.target.files[0];
+              const fname = file.name;
+              handleFileUploadToArweave(file, fname);
+            }
+          }}
+        />
+        <div>{uploadStatus}</div>
       </form>
+
+      {loading ? (
+        <div>Loading...</div>
+      ) : error !== "" ? (
+        <div>{error}</div>
+      ) : (
+        <div>{JSON.stringify(graph)}</div>
+      )}
     </div>
   );
 }
